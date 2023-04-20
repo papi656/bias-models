@@ -80,8 +80,8 @@ def evaluate(model, dataloader, criterion, device, id2label):
     num_tokens = 0
     with torch.no_grad():
         for inputs, labels in dataloader:
-            inputs.to(device)
-            labels.to(device)
+            inputs = inputs.to(device)
+            inputs = labels.to(device)
             outputs = model(inputs)
             #loss
             loss = criterion(outputs, labels)
@@ -107,8 +107,8 @@ def generate_probability_dist_for_tokens(model, dataloader, output_file, device)
     single_sent_prob = []
     with torch.no_grad():
         for inputs, labels in dataloader:
-            inputs.to(device)
-            labels.to(device)
+            inputs = inputs.to(device)
+            labels = labels.to(device)
             outputs = model(inputs)
             for i in range(len(inputs)):
                 if torch.sum(inputs[i]).item() == 30000:
@@ -134,8 +134,8 @@ def generate_prediction_file(model, dataloader, output_file, device, token_lst, 
     pred_labels = []
     with torch.no_grad():
         for inputs, labels in dataloader:
-            inputs.to(device)
-            labels.to(device)
+            inputs = inputs.to(device)
+            labels = labels.to(device)
             outputs = model(inputs)
             pred_id = torch.argmax(outputs, dim=1)
             batch_pred_labels = [id2label[id.item()] for id in pred_id]
@@ -193,7 +193,7 @@ def main():
     #Initialize the model
     model = LinearTagger(input_dim, hidden_dim, output_dim).to(device)
     # loading pretrained weights for our model
-    model.load_state_dict(torch.load('saved_weights/model.pth', map_location=torch.device('cpu')))
+    model.load_state_dict(torch.load('saved_weights/model.pth'))
     criterion = nn.CrossEntropyLoss()
     
     generate_probability_dist_for_tokens(model, train_dataloader, "prob_dist.txt", device)
