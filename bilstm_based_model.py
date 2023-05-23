@@ -12,7 +12,8 @@ from tqdm import tqdm
 import earlyStopping
 
 input_path = 'datasets'
-batch_size = 64
+output_path = 'resources'
+#batch_size = 64
 
 
 def read_data(dataset_name):
@@ -80,6 +81,8 @@ def convert_to_sentence(df):
     for tok,lab in df.itertuples(index = False):
         if isinstance(tok, float):
             sent = sent[1:]
+            if len(sent) == 0 or len(sent[0]) == 0:
+                continue
             sent_list.append(sent)
             sent = ""
             label = label[1:]
@@ -134,7 +137,13 @@ def collate_fn(batch, vocab, label2id):
 
     batch_data = vocab['PAD']*np.ones((len(batch_sentences), batch_max_len))
     batch_labels = -1*np.ones((len(batch_sentences), batch_max_len))
-
+    a = set()
+    for x in batch_tags[i].split(','):
+        a.add(x)
+    if '' in a:
+        print("yes")
+        print(len(batch_tags[0]))
+        print(batch_sentences)
     # copy data to batch_data and batch_labels
     for i in range(len(batch_sentences)):
         cur_len = len(batch_sentences[i].split(' '))
@@ -174,7 +183,7 @@ class bilstmTagger(nn.Module):
         s = self.fc(s) # dim: batch_size*batch_max_len x num_of_tags
 
         # using log_softmax for numerical stability 
-        return F.log_softmax(s, dim=1) # dim: batch_size*batch_max_len x num_of_tags
+        return F.log_softmax(s, dim=1), s # dim: batch_size*batch_max_len x num_of_tags
 
 def loss_fn(outputs, labels):
     """Writing custom loss function as torch.nn.loss will add loss from PAD tokens as well"""
@@ -202,7 +211,7 @@ def train(model, dataloader, optimizer, device):
         #zero the gradients
         optimizer.zero_grad()
         #forward pass
-        outputs = model(inputs)
+        outputs, _ = model(inputs)
         #calculate loss
         loss = loss_fn(outputs, labels)
         #backward pass
@@ -224,12 +233,105 @@ def validation(model, dataloader, device):
         inputs = inputs.to(device)
         labels = labels.to(device)
         # get inference from model
-        outputs = model(inputs)
+        outputs, _ = model(inputs)
         #calculate loss
         loss = loss_fn(outputs, labels)
         total_loss += loss.item()
 
     return total_loss
+
+def inference(model, dataloader, device, id2label):
+    model.eval()
+    test_labels = []
+    for batch in dataloader:
+        inputs = batch[0]
+        labels = batch[1]
+        #move data to device
+        inputs = inputs.to(device)
+        # get inference from model
+        outputs, _ = model(inputs)
+        # print(outputs.shape)
+        # getting mask
+        labels = labels.view(-1)
+        mask = (labels >= 0).float()
+        # applying argmax
+        label_ids = torch.argmax(outputs, dim=1)
+        # adding labels to test_labels
+        for id, m in zip(label_ids, mask):
+            if m == 1:
+                test_labels.append(id2label[id.item()])
+    
+    return test_labels
+
+def generate_prediction_file(pred_lst, tokens_lst, output_file, dataset_name):
+    file_path = os.path.join(output_path, dataset_name, output_file)
+    with open(file_path, 'w') as fh:
+        i = 0
+        for tok in tokens_lst:
+            if isinstance(tok, float):
+                fh.write('\n')
+            else:
+                fh.write(f'{tok}\t{pred_lst[i]}\n')
+                i += 1
+
+def generate_logits_file(model, dataloader, device, dataset_name,token_lst):
+    model.eval()
+    f_name = 'bilstm_logits_' + dataset_name + '.txt'
+    output_file_path = os.path.join(output_path, dataset_name, f_name)
+    logits_lst = []
+    for batch in dataloader:
+        inputs = batch[0]
+        labels = batch[1]
+        inputs = inputs.to(device)
+        _, batch_logits = model(inputs)
+        #getting mask
+        labels = labels.view(-1)
+        mask = (labels >= 0).float()
+        for tensor, m in zip(batch_logits, mask):
+            if m == 1:
+                logits_lst.append(tensor)
+    
+    #writing to file
+    with open(output_file_path, 'w') as fh:
+        i = 0
+        for tok in token_lst:
+            if isinstance(tok, float):
+                fh.write('\n')
+            else:
+                tmp_tensor = logits_lst[i]
+                fh.write(f'{tmp_tensor[0].item()},{tmp_tensor[1].item()},{tmp_tensor[2].item()}\n')
+                i += 1
+
+def generate_prob_dist_file(model, dataloader, device, dataset_name, token_lst):
+    f_name = 'bilstm_prob_dist_' + dataset_name + '.txt'
+    output_file_path = os.path.join(output_path, dataset_name, f_name)
+    prob_dist_lst = []
+    for batch in dataloader:
+        inputs, labels = batch[0], batch[1]
+        inputs = inputs.to(device)
+        _, batch_logits = model(inputs)
+        batch_prob_dist = F.softmax(batch_logits, dim=1)
+        # getting mask
+        labels = labels.view(-1)
+        mask = (labels >= 0).float()
+        for tensor, m in zip(batch_prob_dist, mask):
+            if m == 1:
+                prob_dist_lst.append(tensor.tolist())
+    
+    #writing to file
+    with open(output_file_path, 'w') as fh:
+        i = 0
+        for tok in token_lst:
+            if isinstance(tok, float):
+                fh.write('\n')
+            else:
+                tmp_lst = prob_dist_lst[i]
+                fh.write(f'{tmp_lst[0]},{tmp_lst[1]},{tmp_lst[2]}\n')
+                i += 1
+
+
+
+    
 
 def main():
     parser = argparse.ArgumentParser()
@@ -237,10 +339,16 @@ def main():
     parser.add_argument('--dataset_name', type=str, required=True)
     parser.add_argument('--require_training', help='will train model if specified', action='store_true')
     parser.add_argument('--do_testset', help='Generate predictions for test set to check performance of model', action='store_true')
-    # parser.add_argument('--output_file', type=str, required=True)
+    parser.add_argument('--generate_logits', help='Generates file with pre-softmax logits', action='store_true')
+    parser.add_argument('--generate_prob_dist', help='Generate probability of labels', action='store_true')
+    # parser.add_argument('--output_file', type=str, required=False)
 
     args = parser.parse_args()
-
+    # making diff batch_size for diff dataset
+    if args.dataset_name == 'MedMentions':
+        batch_size = 1
+    else:
+        batch_size = 16
     #read dataset
     train_data, devel_data, test_data = read_data(args.dataset_name)
     #mapping of labels to id
@@ -264,8 +372,8 @@ def main():
 
     if args.require_training:
         optimizer = optim.Adam(model.parameters(), lr=lr)
-        early_stopper = earlyStopping.EarlyStopper(patience=3, min_delta=1)
-        num_epochs = 40
+        early_stopper = earlyStopping.EarlyStopper(patience=4, min_delta=0)
+        num_epochs = 50
         #train dataloader
         train_dataset = dataset(train_sent_lst, train_label_lst, word_to_ix, label2id)
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=lambda batch: collate_fn(batch, word_to_ix, label2id))
@@ -284,13 +392,42 @@ def main():
                 torch.save(model.state_dict(), model_path)
                 print(f'Model saved at epoch {epoch}.\n')
                 break
+    else:
+        # loading saved model
+        model_name = 'bilstm_bias_' + args.dataset_name + '.pth'
+        model_path = os.path.join('saved_weights', model_name)
+        model.load_state_dict(torch.load(model_path, map_location=device))
 
     
-    # if args.do_testset:
+    if args.do_testset:
         # create test dataloader
-        # test_sent_lst, test_label_lst = convert_to_sentence(test_data)
-        # test_dataset = dataset()
+        test_sent_lst, test_label_lst = convert_to_sentence(test_data)
+        test_dataset = dataset(test_sent_lst, test_label_lst, word_to_ix, label2id)
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=lambda batch: collate_fn(batch, word_to_ix, label2id))
+        # # loading saved model
+        # model_name = 'bilstm_bias_' + args.dataset_name + '.pth'
+        # model_path = os.path.join('saved_weights', model_name)
+        # model.load_state_dict(torch.load(model_path, map_location=device))
+        test_labels = inference(model, test_dataloader, device, id2label)
+        
+        #generating prediction file for test.txt
+        output_f_name = 'bilstm_test_' + args.dataset_name + '.txt'
+        generate_prediction_file(test_labels, test_data['Tokens'].tolist(), output_f_name, args.dataset_name)
+        print(f'\tPredictions for test file generated')
 
+    if args.generate_logits:
+        #train dataloader
+        train_dataset = dataset(train_sent_lst, train_label_lst, word_to_ix, label2id)
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=lambda batch: collate_fn(batch, word_to_ix, label2id))
+        generate_logits_file(model, train_dataloader, device, args.dataset_name, train_data['Tokens'].tolist())
+        print(f'\tLogits file generated.')
+
+    if args.generate_prob_dist:
+        #train dataloader
+        train_dataset = dataset(train_sent_lst, train_label_lst, word_to_ix, label2id)
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=lambda batch: collate_fn(batch, word_to_ix, label2id))
+        generate_prob_dist_file(model, train_dataloader, device, args.dataset_name, train_data['Tokens'].tolist())
+        print(f'\tProbability distribution for training set tokens generated.')
 
 
 if __name__ == '__main__':
